@@ -67,6 +67,7 @@ __global__ void fusedssimCUDA(
     float C2,
     const float* __restrict__ img1,
     const float* __restrict__ img2,
+    const float* __restrict__ mask,
     float* __restrict__ ssim_map,
     float* __restrict__ dm_dmu1,
     float* __restrict__ dm_dsigma1_sq,
@@ -79,8 +80,8 @@ __global__ void fusedssimCUDA(
     const int pix_id = pix_y * W + pix_x;
     const int num_pix = H * W;
 
-    // Shared memory for the tile (img1, img2)
-    __shared__ float sTile[SHARED_Y][SHARED_X][2];
+    // Shared memory for the tile (img1, img2, mask)
+    __shared__ float sTile[SHARED_Y][SHARED_X][3];  // 0=img1, 1=img2, 2=mask
     // After horizontal pass, store partial sums here
     // xconv[y][x] -> (sumX, sumX^2, sumY, sumY^2, sumXY)
     __shared__ float xconv[CONV_Y][CONV_X][5];
@@ -88,7 +89,7 @@ __global__ void fusedssimCUDA(
     // Each block processes B x C sub-batches. We loop over channels:
     for (int c = 0; c < CH; ++c) {
         // ------------------------------------------------------------
-        // 1) Load (img1, img2) tile + halo into shared memory
+        // 1) Load (img1, img2, mask) tile + halo into shared memory
         // ------------------------------------------------------------
         {
             const int tileSize = SHARED_Y * SHARED_X;
@@ -108,9 +109,11 @@ __global__ void fusedssimCUDA(
 
                     float X = get_pix_value(img1, bIdx, c, gy, gx, CH, H, W);
                     float Y = get_pix_value(img2, bIdx, c, gy, gx, CH, H, W);
+                    float M = (mask) ? get_pix_value(mask, bIdx, c, gy, gx, CH, H, W) : 1.0f;
 
                     sTile[local_y][local_x][0] = X;
                     sTile[local_y][local_x][1] = Y;
+                    sTile[local_y][local_x][2] = M; 
                 }
             }
         }
@@ -252,7 +255,8 @@ __global__ void fusedssimCUDA(
                 float C_ = 2.f * mu1 * mu2 + C1;
                 float D_ = 2.f * sigma12 + C2;
 
-                float val = (C_ * D_) / (A * B);
+                float m = sTile[ly][lx][2];  // mask value at this pixel
+                float val = (C_ * D_) / (A * B) * m;  // invalid pixels -> 0
 
                 int global_idx = bIdx * CH * num_pix + c * num_pix + pix_id;
                 ssim_map[global_idx] = val;
@@ -292,6 +296,7 @@ __global__ void fusedssim_backwardCUDA(
     const float* __restrict__ img1,
     const float* __restrict__ img2,
     const float* __restrict__ dL_dmap,
+    const float* __restrict__ mask,
     float* __restrict__ dL_dimg1,
     const float* __restrict__ dm_dmu1,
     const float* __restrict__ dm_dsigma1_sq,
@@ -307,7 +312,9 @@ __global__ void fusedssim_backwardCUDA(
 
     // Shared memory for the fused data:
     // [0]: dm_dmu1*dL, [1]: dm_dsigma1_sq*dL, [2]: dm_dsigma12*dL
-    __shared__ float sData[3][SHARED_Y][SHARED_X];
+    // Shared memory: [0]=dm_dmu1*dL, [1]=dm_dsigma1_sq*dL, [2]=dm_dsigma12*dL, [3]=MASK
+    __shared__ float sData[SHARED_Y][SHARED_X][4];
+    // __shared__ float sData[3][SHARED_Y][SHARED_X];
     __shared__ float sScratch[CONV_Y][CONV_X][3];
 
     for (int c = 0; c < CH; ++c) {
@@ -337,10 +344,13 @@ __global__ void fusedssim_backwardCUDA(
                     float vmu   = get_pix_value(dm_dmu1,      bIdx, c, gy, gx, CH, H, W);
                     float vs1   = get_pix_value(dm_dsigma1_sq,bIdx, c, gy, gx, CH, H, W);
                     float vs12  = get_pix_value(dm_dsigma12,  bIdx, c, gy, gx, CH, H, W);
+                    float m     = get_pix_value(mask,   bIdx, c, gy, gx, CH, H, W);  // fetch mask
+                    chain *= m;   
 
                     sData[0][row][col] = vmu  * chain;
                     sData[1][row][col] = vs1  * chain;
                     sData[2][row][col] = vs12 * chain;
+                    sData[row][col][3] = m; 
                 }
             }
         }
@@ -359,27 +369,20 @@ __global__ void fusedssim_backwardCUDA(
 #pragma unroll
                     for (int d = 1; d <= HALO; ++d) {
                         float w = cGauss[HALO - d];
-                        float left0  = sData[0][yy][lx - d];
-                        float left1  = sData[1][yy][lx - d];
-                        float left2  = sData[2][yy][lx - d];
+                        float* left = sData[yy][lx - d];
+                        float* right= sData[yy][lx + d];
 
-                        float right0 = sData[0][yy][lx + d];
-                        float right1 = sData[1][yy][lx + d];
-                        float right2 = sData[2][yy][lx + d];
-
-                        accum0 += (left0 + right0) * w;
-                        accum1 += (left1 + right1) * w;
-                        accum2 += (left2 + right2) * w;
+                        accum0 += (left[0] + right[0]) * w;
+                        accum1 += (left[1] + right[1]) * w;
+                        accum2 += (left[2] + right[2]) * w;
                     }
-                    // center
+                    // centre
                     {
                         float wc = cGauss[HALO];
-                        float c0 = sData[0][yy][lx];
-                        float c1 = sData[1][yy][lx];
-                        float c2 = sData[2][yy][lx];
-                        accum0 += c0 * wc;
-                        accum1 += c1 * wc;
-                        accum2 += c2 * wc;
+                        float* ctr = sData[yy][lx];
+                        accum0 += ctr[0] * wc;
+                        accum1 += ctr[1] * wc;
+                        accum2 += ctr[2] * wc;
                     }
 
                     sScratch[yy][threadIdx.x][0] = accum0;
@@ -437,8 +440,27 @@ fusedssim(
     float C2,
     torch::Tensor &img1,
     torch::Tensor &img2,
+    torch::Tensor mask,
     bool train
 ) {
+
+    // Ensure mask is on the same device and has the correct dtype
+    mask = mask.to(img1.device).to(torch::kFloat32);
+
+    // Broadcast mask to (N, C, H, W) if necessary
+    if (mask.dim() == 3) {                     // (N, H, W)
+        mask = mask.unsqueeze(1);              // (N, 1, H, W)
+    }
+    if (mask.dim() == 2) {                     // (1, H, W)
+        mask = mask.unsqueeze(0).unsqueeze(0); // (1, 1, H, W)
+    }
+    // If mask has C channels, we keep it, otherwise repeat over C
+    if (mask.size(1) == 1) {
+        mask = mask.expand_as(img1);           // repeat along C
+    } else if (mask.size(1) != img1.size(1)) {
+        TORCH_CHECK(false, "Mask channel size must match img1/img2 channels or be 1.");
+    }
+
     const at::cuda::OptionalCUDAGuard device_guard(device_of(img1));
     int B  = img1.size(0);
     int CH = img1.size(1);
@@ -463,13 +485,38 @@ fusedssim(
         H, W, CH, C1, C2,
         img1.contiguous().data_ptr<float>(),
         img2.contiguous().data_ptr<float>(),
+        mask.contiguous().data_ptr<float>(),
         ssim_map.data_ptr<float>(),
         train ? dm_dmu1.data_ptr<float>()       : nullptr,
         train ? dm_dsigma1_sq.data_ptr<float>() : nullptr,
         train ? dm_dsigma12.data_ptr<float>()   : nullptr
     );
 
-    return std::make_tuple(ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12);
+    torch::Tensor valid_mask = mask;
+    if (valid_mask.numel() == 0) {
+        // No valid region -> return 0 tensor
+        return std::make_tuple(ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12);
+    }
+    // Multiply the map with the mask before summing
+    torch::Tensor masked_map = ssim_map * valid_mask;
+
+    // Number of valid pixels (sum of mask)
+    torch::Tensor valid_pixels = valid_mask.sum();
+
+    // Avoid division by zero
+    if (valid_pixels.item<float>() < 1e-6) {
+        valid_pixels = torch::tensor(1.0f, valid_pixels.options());
+    }
+
+    // TODO: check the value below for consistency
+    // mean() -> should remove value from the pytorch inference mean() after getting `ssim_map`
+    torch::Tensor ssim_mean = masked_map.sum() / valid_pixels;
+
+    // Resize ssim_mean to scalar (the original code returned a scalar)
+    ssim_mean = ssim_mean.unsqueeze(-1).unsqueeze(-1).unsqueeze(0); 
+    // (the wrapper can also just return the scalar – adjust to your API)
+
+    return std::make_tuple(ssim_mean, dm_dmu1, dm_dsigma1_sq, dm_dsigma12);
 }
 
 // ------------------------------------------
@@ -485,6 +532,7 @@ fusedssim_backward(
     torch::Tensor &img1,
     torch::Tensor &img2,
     torch::Tensor &dL_dmap,
+    torch::Tensor &mask,
     torch::Tensor &dm_dmu1,
     torch::Tensor &dm_dsigma1_sq,
     torch::Tensor &dm_dsigma12
@@ -497,6 +545,11 @@ fusedssim_backward(
 
     auto dL_dimg1 = torch::zeros_like(img1);
 
+
+    // Make sure mask has the same spatial size
+    TORCH_CHECK(mask.size(-2) == H && mask.size(-1) == W,
+                "Mask must have the same H/W as the images.");
+
     dim3 grid((W + BLOCK_X - 1) / BLOCK_X,
               (H + BLOCK_Y - 1) / BLOCK_Y,
               B);
@@ -506,6 +559,7 @@ fusedssim_backward(
         H, W, CH, C1, C2,
         img1.contiguous().data_ptr<float>(),
         img2.contiguous().data_ptr<float>(),
+        mask.contiguous().data_ptr<float>(),
         dL_dmap.contiguous().data_ptr<float>(),
         dL_dimg1.data_ptr<float>(),
         dm_dmu1.contiguous().data_ptr<float>(),
