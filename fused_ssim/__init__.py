@@ -32,6 +32,8 @@ class FusedSSIMMap(torch.autograd.Function):
             padding: "same" or "valid"
             train: flag that is passed to the fused kernel
         """
+        if mask is None:
+            mask = torch.ones_like(img1)
         ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12 = fusedssim(C1, C2, img1, img2, mask, train)
 
         if padding == "valid":
