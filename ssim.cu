@@ -440,7 +440,7 @@ fusedssim(
     float C2,
     torch::Tensor &img1,
     torch::Tensor &img2,
-    torch::Tensor mask,
+    torch::Tensor &mask,
     bool train
 ) {
 
