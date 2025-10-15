@@ -69,4 +69,5 @@ def fused_ssim(img1, img2, mask=None, padding="same", train=True):
 
     img1 = img1.contiguous()
     map = FusedSSIMMap.apply(C1, C2, img1, img2, mask, padding, train)
+    map = map.sum() / mask.sum()
     return map
