@@ -10,6 +10,7 @@ fusedssim(
     float C2,
     torch::Tensor &img1,
     torch::Tensor &img2,
+    torch::Tensor &mask,
     bool train
 );
 
@@ -20,6 +21,7 @@ fusedssim_backward(
     torch::Tensor &img1,
     torch::Tensor &img2,
     torch::Tensor &dL_dmap,
+    torch::Tensor &mask,
     torch::Tensor &dm_dmu1,
     torch::Tensor &dm_dsigma1_sq,
     torch::Tensor &dm_dsigma12
