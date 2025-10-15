@@ -47,7 +47,6 @@ class FusedSSIMMap(torch.autograd.Function):
         ctx.padding = padding
 
         return ssim_map
-        # TODO: it is already `mean()` -> the function should not call `mean()`
 
     @staticmethod
     def backward(ctx, opt_grad):
