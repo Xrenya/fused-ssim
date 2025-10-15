@@ -256,10 +256,10 @@ __global__ void fusedssimCUDA(
                 float D_ = 2.f * sigma12 + C2;
 
                 float m = sTile[ly][lx][2];  // mask value at this pixel
-                float val = (C_ * D_) / (A * B) * m;  // invalid pixels -> 0
+                float val = (C_ * D_) / (A * B);
 
                 int global_idx = bIdx * CH * num_pix + c * num_pix + pix_id;
-                ssim_map[global_idx] = val;
+                ssim_map[global_idx] = val * m;  // invalid pixels -> 0
 
                 if (dm_dmu1) {
                     // partial derivatives
