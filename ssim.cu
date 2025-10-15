@@ -445,7 +445,7 @@ fusedssim(
 ) {
 
     // Ensure mask is on the same device and has the correct dtype
-    mask = mask.to(img1.device).to(torch::kFloat32);
+    mask = mask.to(torch::kFloat32);
 
     // Broadcast mask to (N, C, H, W) if necessary
     if (mask.dim() == 3) {                     // (N, H, W)
